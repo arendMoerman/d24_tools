@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+src/d24_tools/__pycache__/
 *.py[cod]
 *$py.class
 
@@ -165,4 +166,5 @@ cython_debug/
 *.swo
 
 *.bk
+
 
