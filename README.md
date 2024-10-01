@@ -23,7 +23,7 @@ For pswsc data reduction, the flow is as follows:
 This produces a single spectrum, which can be stacked together with other spectra. 
 It can also be rebinned in case this is desired.
 
-See example usage in `reduce_pswsc.py`.
+See example usage in `examples/reduce_pswsc_example.py`.
 
 ## Reduction of daisy AB data
 For daisy with AB chopping data, the procedure is as follows:

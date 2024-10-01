@@ -25,11 +25,11 @@ def obs_to_nod_avg(da_sub, conv_factor):
     da_sub = da_sub.groupby("scan").map(tools._subtract_per_scan, args=(conv_factor,))
     
 
-    scan_labels = da_sub["avg"].scan.data.astype(int)
+    scan_labels = da_sub["avg_last"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)
 
-    spec_avg = da_sub["avg"].data[args_sort]
-    spec_var = da_sub["var"].data[args_sort]
+    spec_avg = da_sub["avg_last"].data[args_sort]
+    spec_var = da_sub["var_last"].data[args_sort]
     assert(len(args_sort) % 2 == 0)
 
     cycle_avg = np.zeros((spec_avg.shape[0] // 4, spec_avg.shape[1]))

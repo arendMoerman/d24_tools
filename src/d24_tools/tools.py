@@ -7,9 +7,8 @@ from datetime import datetime, timedelta
 import copy
 from d24_tools import colors
 from d24_tools import atmosphere
+from d24_tools import methods
 from functools import partial
-
-CHOPSEP = -234
 
 def _green(string, bold=True):
     """
@@ -35,70 +34,6 @@ def _yellow(string, bold=True):
         return colors.YELLOW + colors.BOLD + string + colors.END
     return colors.YELLOW + string + colors.END
 
-def _subtract_per_scan(dems, conv_factor=1):
-    """Apply source-sky subtraction to a single-scan DEMS."""
-    if len(states := np.unique(dems.state)) != 1:
-        raise ValueError("State must be unique.")
-
-    n_first = dems.state.size // 2
-    n_last = dems.state.size - n_first 
-    
-    t_amb_first = np.nanmean(dems.temperature.data[:n_first-1])
-    t_amb_last = np.nanmean(dems.temperature.data[n_first:])
-
-    if (state := states[0]) == "ON":
-        src = dc.select.by(dems, "beam", include="A")
-        sky = dc.select.by(dems, "beam", include="B")
-
-    if state == "OFF":
-        src = dc.select.by(dems, "beam", include="B")
-        sky = dc.select.by(dems, "beam", include="A")
-    
-    signal_first = conv_factor * t_amb_first * (src[:n_first-1] - sky[:n_first-1].mean("time").data) / ((t_amb_first - sky[:n_first-1].mean("time")))
-    signal_last = conv_factor * t_amb_last * (src[n_first:] - sky[n_first:].mean("time").data) / ((t_amb_last - sky[n_first:].mean("time")))
-
-    da_first_name = signal_first.name
-
-    average_first = signal_first.mean("time")
-    variance_first = signal_first.var("time")
-
-    ds_out_first = xr.merge([average_first.rename("avg"), variance_first.rename("var")])
-    return ds_out_first
-
-def _overshoot_per_scan(dems, buff):
-    """Apply overshoot removal to a single-scan DEMS."""
-    if len(states := np.unique(dems.state)) != 1:
-        raise ValueError("State must be unique.")
-
-    if (state := states[0]) == "ON":
-        good = (np.absolute(dems.lon.data) < buff) & (np.absolute(dems.lat.data) < buff)
-
-    if state == "OFF":
-        good = (np.absolute(dems.lon.data - CHOPSEP) < buff) & (np.absolute(dems.lat.data) < buff)
-
-    startbuff = np.zeros(10)
-    if dems.scan[0] != "1":
-        good[:10] = startbuff
-
-    #print(dems.scan) 
-    #import matplotlib.pyplot as plt
-    #plt.scatter(dems.time.values[good], dems.data[good,0])
-    #plt.show()
-
-    return dems[good]
-
-    raise ValueError("State must be either ON or OFF.")
-
-def _consecutive(data, stepsize=1):
-    """
-    Take numpy array and return list with arrays containing consecutive blocks
-    
-    @param data Array in which consecutive chunks are to be located.
-
-    @returns List with arrays of consecutive chunks of data as elements.
-    """
-
-    return np.split(data, np.where(np.diff(data) != stepsize)[0]+1)
 
 def remove_bad_indices(da, indices):
     """
@@ -113,7 +48,7 @@ def remove_bad_indices(da, indices):
 
     return da
 
-def despike(da, include=["ON", "OFF"], by="state", flatten=False):
+def despike(da, include=["ON", "OFF"], by="state"):
     """
     Despike a TOD and return index chunks belonging to beam A and B, given an inclusion string/list of strings.
 
@@ -122,13 +57,8 @@ def despike(da, include=["ON", "OFF"], by="state", flatten=False):
         For pswsc observations, ["ON", "OFF"] is recommended.
         For daisy scans, use "SCAN".
     @param by Label to include by. Default is 'state'
-    @param flatten Flatten output list of index chunks. Default is False
     
-    @returns Data array with only the included labels
-    @returns List of index chunks belonging to beam A, despiked, indexed in returned data array
-        If flatten=True, will return numpy array containing indices
-    @returns List of index chunks belonging to beam B, despiked, indexed in returned data array
-        If flatten=True, will return numpy array containing indices
+    @returns Despiked data array with only the included labels
     """
 
     # Select the part of the observation in the OFF position, so that beam A is looking at the atmosphere
@@ -141,8 +71,8 @@ def despike(da, include=["ON", "OFF"], by="state", flatten=False):
     
     assert(all_idx.size == (idx_A.size + idx_B.size))
     
-    chunk_list_A = _consecutive(idx_A)
-    chunk_list_B = _consecutive(idx_B)
+    chunk_list_A = methods._consecutive(idx_A)
+    chunk_list_B = methods._consecutive(idx_B)
 
     chunk_list_despiked_A = []
     chunk_list_despiked_B = []
@@ -177,10 +107,75 @@ def remove_overshoot(da_sub, buff=0.5):
     @returns List (or numpy array if idx_B was flat) containing despiked and on-point beam B indices.
     """
 
-    _overshoot_buffed = partial(_overshoot_per_scan, buff=buff)
+    _overshoot_buffed = partial(methods._overshoot_per_scan, buff=buff)
     return da_sub.groupby("scan").map(_overshoot_buffed)
 
-def reduce_observation(da_sub, resolution="nod", debug=False):
+def reduce_observation_full(da_sub, conv_factor=1):
+    """
+    Average a pswsc observation over the full observation.
+
+    @param da_sub Data array that has been despiked and overshoot-removed.
+
+    @returns Array with the average signal, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
+
+    spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
+    spec_var = np.nanmean(da_sub["var"].data, axis=0)
+
+    return spec_avg, spec_var, master_id, freq
+
+def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1):
+    """
+    Average ABBA off-source and on-source beams and subtract.
+    The averaging is 
+
+    @param da_sub Data array that has been despiked and overshoot-removed.
+    @param resolution Unit to average over. Default is 'nod'.
+        If 'nod' : Apply variance weighted averaging over nod cycles.
+        If 'obs' : Apply averaging over full observation
+
+    @returns Array with the average signal, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
+
+    scan_labels = da_sub["avg"].scan.data.astype(int)
+    args_sort = np.argsort(scan_labels)
+
+    spec_avg = da_sub["avg"].data[args_sort]
+    spec_var = da_sub["var"].data[args_sort]
+
+    cycle_avg = np.zeros((spec_avg.shape[0] // num_nods, spec_avg.shape[1]))
+    cycle_var = np.zeros((spec_var.shape[0] // num_nods, spec_var.shape[1]))
+    for i in range(len(args_sort) // num_nods):
+        for j in range(num_nods):
+            cycle_avg[i] += spec_avg[i*num_nods + j]
+            cycle_var[i] += spec_var[i*num_nods + j]
+
+    cycle_avg /= num_nods
+    cycle_var /= num_nods
+
+    weight = np.nansum(1 / cycle_var, axis=0)
+    spec_avg = np.nansum(cycle_avg / cycle_var, axis=0) / weight
+    spec_var = 1 / weight
+    
+    return spec_avg, spec_var, master_id, freq
+
+def reduce_observation(da_sub, resolution="nod", conv_factor=1):
     """
     Average ABBA off-source and on-source beams and subtract.
 
@@ -198,22 +193,60 @@ def reduce_observation(da_sub, resolution="nod", debug=False):
     master_id = da_sub.chan.values
     freq = da_sub.d2_mkid_frequency.values
 
-    da_sub = da_sub.groupby("scan").map(_subtract_per_scan)
-    
-    if debug:
-        return da_sub
+    da_sub = da_sub.groupby("scan").map(_subtract_per_scan, args=(conv_factor,))
 
     if resolution == 'obs':
-        spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
-        spec_var = np.nanvar(da_sub["avg"].data, axis=0)
+        spec_avg = np.nanmean(da_sub["avg_first"].data, axis=0)
+        spec_var = np.nanvar(da_sub["avg_first"].data, axis=0)
     
     elif resolution == 'nod':
-        scan_labels = da_sub["avg"].scan.data.astype(int)
+        scan_labels = da_sub["avg_first"].scan.data.astype(int)
         args_sort = np.argsort(scan_labels)
 
-        spec_avg = da_sub["avg"].data[args_sort]
-        spec_var = da_sub["var"].data[args_sort]
+        spec_avg_first = da_sub["avg_first"].data[args_sort]
+        spec_var_first = da_sub["var_first"].data[args_sort]
+        
+        spec_avg_last = da_sub["avg_last"].data[args_sort]
+        spec_var_last = da_sub["var_last"].data[args_sort]
+
+        avg_l = []
+        var_l = []
+
+        for i in range(len(args_sort)):
+            avg_l.append(spec_avg_first[i])
+            avg_l.append(spec_avg_last[i])
+            
+            var_l.append(spec_var_first[i])
+            var_l.append(spec_var_last[i])
+
+        running_avg = avg_l[0]
+        running_var = var_l[0]
+
+        cycle_avg = []
+        cycle_var = []
+
+        n = 0
+        nods = 0
+        N = 5
+        for i in range(1,len(avg_l) - 1):
+            running_avg += avg_l[i]
+            running_var += var_l[i]
+
+            n += 1
+            if n == 4:
+                cycle_avg.append(running_avg / N)
+
+                N = 4
+                n = 0
+
+        print(len(avg_l))
+
         assert(len(args_sort) % 2 == 0)
+
+        cycle_store_avg = []
+        cycle_store_var = []
+
+        cycle_store_avg.append((spec_avg_first[0]+spec_avg_last[0]) / 2)
 
         cycle_avg = np.zeros((spec_avg.shape[0] // 4, spec_avg.shape[1]))
         cycle_var = np.zeros((spec_var.shape[0] // 4, spec_var.shape[1]))
@@ -228,6 +261,11 @@ def reduce_observation(da_sub, resolution="nod", debug=False):
         weight = np.nansum(1 / cycle_var, axis=0)
         spec_avg = np.nansum(cycle_avg / cycle_var, axis=0) / weight
         spec_var = 1 / weight
+
+        spec_avg = np.nanmean(cycle_avg, axis=0)
+        spec_var = np.nanvar(cycle_avg, axis=0)
+
+        print(spec_avg.shape)
 
     else:
         print(f"Unknown value {resolution} for resolution!")
