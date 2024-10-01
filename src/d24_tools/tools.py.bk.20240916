@@ -1,0 +1,498 @@
+import decode as dc
+import numpy as np
+import xarray as xr
+import scipy.interpolate as interp
+from datetime import datetime, timedelta
+
+import copy
+from d24_tools import colors
+from d24_tools import atmosphere
+from functools import partial
+
+CHOPSEP = -234
+
+def _green(string, bold=True):
+    """
+    Formatter for green terminal output.
+
+    @param string String to be formatted.
+
+    @returns Formatted string
+    """
+    if bold:
+        return colors.GREEN + colors.BOLD + string + colors.END
+    return colors.GREEN + string + colors.END
+
+def _yellow(string, bold=True):
+    """
+    Formatter for yellow terminal output.
+
+    @param string String to be formatted.
+
+    @returns Formatted string
+    """
+    if bold:
+        return colors.YELLOW + colors.BOLD + string + colors.END
+    return colors.YELLOW + string + colors.END
+
+def _subtract_per_scan(dems):
+    """Apply source-sky subtraction to a single-scan DEMS."""
+    t_amb = np.nanmean(dems.temperature.data)
+    if len(states := np.unique(dems.state)) != 1:
+        raise ValueError("State must be unique.")
+
+    if (state := states[0]) == "ON":
+        src = dc.select.by(dems, "beam", include="A")
+        sky = dc.select.by(dems, "beam", include="B")
+
+    if state == "OFF":
+        src = dc.select.by(dems, "beam", include="B")
+        sky = dc.select.by(dems, "beam", include="A")
+    
+    signal = t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+    da_name = signal.name
+
+    average = signal.mean("time")
+    variance = signal.var("time")
+
+    return xr.merge([average.rename("avg"), variance.rename("var")])
+
+def _overshoot_per_scan(dems, buff):
+    """Apply overshoot removal to a single-scan DEMS."""
+    if len(states := np.unique(dems.state)) != 1:
+        raise ValueError("State must be unique.")
+
+    if (state := states[0]) == "ON":
+        good = (np.absolute(dems.lon.data) < buff) & (np.absolute(dems.lat.data) < buff)
+
+    if state == "OFF":
+        good = (np.absolute(dems.lon.data - CHOPSEP) < buff) & (np.absolute(dems.lat.data) < buff)
+
+    startbuff = np.zeros(10)
+    if dems.scan[0] != "1":
+        good[:10] = startbuff
+
+    #print(dems.scan) 
+    #import matplotlib.pyplot as plt
+    #plt.scatter(dems.time.values[good], dems.data[good,0])
+    #plt.show()
+
+    return dems[good]
+
+    raise ValueError("State must be either ON or OFF.")
+
+def _consecutive(data, stepsize=1):
+    """
+    Take numpy array and return list with arrays containing consecutive blocks
+    
+    @param data Array in which consecutive chunks are to be located.
+
+    @returns List with arrays of consecutive chunks of data as elements.
+    """
+
+    return np.split(data, np.where(np.diff(data) != stepsize)[0]+1)
+
+def despike(da, include=["ON", "OFF"], by="state", flatten=False):
+    """
+    Despike a TOD and return index chunks belonging to beam A and B, given an inclusion string/list of strings.
+
+    @param da Data array containing TOD
+    @param include String or list of strings containing inclusion parameters.
+        For pswsc observations, ["ON", "OFF"] is recommended.
+        For daisy scans, use "SCAN".
+    @param by Label to include by. Default is 'state'
+    @param flatten Flatten output list of index chunks. Default is False
+    
+    @returns Data array with only the included labels
+    @returns List of index chunks belonging to beam A, despiked, indexed in returned data array
+        If flatten=True, will return numpy array containing indices
+    @returns List of index chunks belonging to beam B, despiked, indexed in returned data array
+        If flatten=True, will return numpy array containing indices
+    """
+
+    # Select the part of the observation in the OFF position, so that beam A is looking at the atmosphere
+    da_sub = dc.select.by(da, by, include=include)
+    
+    idx_A = np.squeeze(np.argwhere(da_sub.beam.data == "A"))
+    idx_B = np.squeeze(np.argwhere(da_sub.beam.data == "B"))
+
+    all_idx = np.arange(da_sub.shape[0])
+    
+    assert(all_idx.size == (idx_A.size + idx_B.size))
+    
+    chunk_list_A = _consecutive(idx_A)
+    chunk_list_B = _consecutive(idx_B)
+
+    chunk_list_despiked_A = []
+    chunk_list_despiked_B = []
+
+    print(_green("despiking TOD..."))
+    for idx_chunk_A in chunk_list_A:
+        if idx_chunk_A.size >= 3:
+            chunk_list_despiked_A.append(idx_chunk_A[1:-1])
+        
+    for idx_chunk_B in chunk_list_B:
+        if idx_chunk_B.size >= 3:
+            chunk_list_despiked_B.append(idx_chunk_B[1:-1])
+
+    chunk_list_despiked_A = np.array([x for xs in chunk_list_despiked_A for x in xs])
+    chunk_list_despiked_B = np.array([x for xs in chunk_list_despiked_B for x in xs])
+    
+    despiked_indices = np.concatenate((chunk_list_despiked_A, chunk_list_despiked_B))
+
+    da_despiked = da_sub[despiked_indices]
+
+    return da_despiked
+
+def remove_overshoot(da_sub, buff=0.5):
+    """
+    Remove overshoot in chunks of data array of pswsc observation type.
+    Essentially, it only selects the indices inside the data array for which the dAz and dEl agree with the given offset.
+    
+    @param da_sub Data array that has already been despiked.
+    @param buff Range of angle in arcsec around dAz and dEl in which to select good points. Default is 0.5
+    
+    @returns List (or numpy array if idx_A was flat) containing despiked and on-point beam A indices.
+    @returns List (or numpy array if idx_B was flat) containing despiked and on-point beam B indices.
+    """
+
+    _overshoot_buffed = partial(_overshoot_per_scan, buff=buff)
+    return da_sub.groupby("scan").map(_overshoot_buffed)
+
+def reduce_observation(da_sub, resolution="nod"):
+    """
+    Average ABBA off-source and on-source beams and subtract.
+
+    @param da_sub Data array that has been despiked and overshoot-removed.
+    @param resolution Unit to average over. Default is 'nod'.
+        If 'nod' : Apply variance weighted averaging over nod cycles.
+        If 'obs' : Apply averaging over full observation
+
+    @returns Array with the average signal, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    da_sub = da_sub.groupby("scan").map(_subtract_per_scan)
+    
+    if resolution == 'obs':
+        spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
+        spec_var = np.nanvar(da_sub["avg"].data, axis=0)
+    
+    elif resolution == 'nod':
+        scan_labels = da_sub["avg"].scan.data.astype(int)
+        args_sort = np.argsort(scan_labels)
+
+        spec_avg = da_sub["avg"].data[args_sort]
+        spec_var = da_sub["var"].data[args_sort]
+        assert(len(args_sort) % 2 == 0)
+
+        cycle_avg = np.zeros((spec_avg.shape[0] // 4, spec_avg.shape[1]))
+        cycle_var = np.zeros((spec_var.shape[0] // 4, spec_var.shape[1]))
+        for i in range(len(args_sort) // 4):
+            for j in range(4):
+                cycle_avg[i] += spec_avg[i*4 + j]
+                cycle_var[i] += spec_var[i*4 + j]
+
+        cycle_avg /= 4
+        cycle_var /= 4
+
+        weight = np.nansum(1 / cycle_var, axis=0)
+        spec_avg = np.nansum(cycle_avg / cycle_var, axis=0) / weight
+        spec_var = 1 / weight
+
+    else:
+        print(f"Unknown value {resolution} for resolution!")
+        exit(1)
+
+    return spec_avg, spec_var, master_id, freq
+
+def reduce_chops_to_nod(da_sub, idx_rem_A, idx_rem_B, obsid=None):
+    """
+    Reduce a pswsc sub data array to a data array containing subtracted and averaged on-source chop values.
+    Subtraction happens by linear interpolation on off-source chop averages.
+    The averaging happens to the level of a nod. 
+    Per nod, the average timestamp is calculated and assigned to the nod average. 
+    Optionally, atmospheric correction can be applied to each nod. 
+    In this case, the average PWV of all on-source chops inside the nod is calculated and used to calculate the atmosphere-corrected antenna temperature.
+    For this, currently the APEX PWV is used, together with the ATM transmission tool.
+
+    @param da_sub Data array that has been despiked and overshoot-removed.
+    @param idx_rem_A Indices of timestamps in beam A, despiked and overshoot-removed.
+    @param idx_rem_B Indices of timestamps in beam B, despiked and overshoot-removed.
+    @param obsid Apply atmospheric correction, if obsid is given. Otherwise, no correction. Default is None.
+    
+    @returns Array with the average signal per nod, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+    
+    idx_rem_A = [x for x in idx_rem_A if x.size != 0]
+    idx_rem_B = [x for x in idx_rem_B if x.size != 0]
+
+    sky_means = []
+    sky_times = []
+
+    #da_sub = da_sub.sortby("d2_mkid_frequency")
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    if obsid is not None:
+        pwv_interp = atmosphere.getInterpolatorPWV(obsid)
+        atm_interp = atmosphere.getInterpolatorATM()
+    
+    print(_green("Calculating chunk averages in off-source beams..."))
+    for i, chunk in enumerate(idx_rem_A):
+        print(_green(f"Beam A, chunk {i} / {len(idx_rem_A)}", bold=False), end= "\r")
+        if da_sub.state.data[chunk[0]] == "ON":
+                continue
+        sky_means.append(np.nanmean(da_sub[chunk], axis=0))
+        sky_times.append(np.average(da_sub.time.values.astype('datetime64[ms]').astype('int')[chunk]))
+    
+    for i, chunk in enumerate(idx_rem_B):
+        print(_green(f"Beam B, chunk {i} / {len(idx_rem_B)}", bold=False), end= "\r")
+        if da_sub.state.data[chunk[0]] == "OFF":
+                continue
+        sky_means.append(np.nanmean(da_sub[chunk], axis=0))
+        sky_times.append(np.average(da_sub.time.values.astype('datetime64[ms]').astype('int')[chunk]))
+
+    sky_means = np.array(sky_means)
+    sky_times = np.array(sky_times)
+
+    idx_sort = np.argsort(sky_times)
+    sky_times = np.sort(sky_times)
+    sky_means = sky_means[idx_sort]
+
+    # Now I have array with average off-source values, as function of time
+
+    atm_src_interp = interp.interp1d(sky_times, sky_means, fill_value='extrapolate', axis=0)
+    
+    src_idxs = []
+    src_times = []
+
+    print(_green("Removing atmosphere baseline from on-source beam..."))
+    for i, chunk in enumerate(idx_rem_A):
+        print(colors.GREEN + f"Beam A, chunk {i} / {len(idx_rem_A)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "OFF":
+                continue
+
+        for _idx in chunk:
+            src_idxs.append(_idx)
+            src_times.append(da_sub.time.values.astype('datetime64[ms]').astype('int')[_idx])
+    
+    for i, chunk in enumerate(idx_rem_B):
+        print(colors.GREEN + f"Beam B, chunk {i} / {len(idx_rem_B)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "ON":
+                continue
+        for _idx in chunk:
+            src_idxs.append(_idx)
+            src_times.append(da_sub.time.values.astype('datetime64[ms]').astype('int')[_idx])
+
+    src_idxs = np.array(src_idxs)
+    src_times = np.array(src_times)
+
+    idx_sort = np.argsort(src_times)
+    src_times = np.sort(src_times)
+    src_idxs = src_idxs[idx_sort]
+    
+    atm_src = atm_src_interp(src_times)
+
+    da_sub[src_idxs] -= atm_src
+    #print(da_sub.data[src_idxs])
+    da_sub_red = da_sub[src_idxs]
+    
+    average = np.nanmean(da_sub_red.data, axis=0)
+    variance = np.nanvar(da_sub_red.data, axis=0)
+
+    if obsid is not None:
+        pwv = np.nanmean(pwv_interp(src_times))
+        secz = np.nanmean(da_sub_red.secz.values)
+        eta_atm_arr = atm_interp(freq, pwv, grid=False)**secz
+
+        average /= eta_atm_arr
+        variance /= (eta_atm_arr)**2
+
+    return average, variance, master_id, freq
+
+def reduce_chops(da_sub, idx_rem_A, idx_rem_B, obsid=None, average_TOD=False):
+    """
+    Reduce an AB scan or daisy sub data array to a data array containing subtracted beam A values.
+    Subtraction happens by linear interpolation on beam B chop averages.
+    Optionally, atmospheric correction can be applied to the total TOD. 
+    In this case, the average PWV of all beam A chops is calculated and used to calculate the atmosphere-corrected antenna temperature.
+    For this, currently the APEX PWV is used, together with the ATM transmission tool.
+
+    @param da_sub Data array that has been despiked.
+    @param idx_rem_A Indices of timestamps in beam A, despiked.
+    @param idx_rem_B Indices of timestamps in beam B, despiked.
+    @param obsid Apply atmospheric correction, if obsid is given. Otherwise, no correction. Default is None.
+    @param average_TOD Whether to return the average of the beam A TOD or not. Default is False.
+
+    @returns Data array with the full beam A TOD, for each KID. Only returned if average_TOD=False.
+    @returns Array with average of beam A TOD, for each KID. Only returned if average_TOD=True.
+    @returns Array with variance of beam A TOD, for each KID. Only returned if average_TOD=True.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+    
+    idx_rem_A = [x for x in idx_rem_A if x.size != 0]
+    idx_rem_B = [x for x in idx_rem_B if x.size != 0]
+
+    sky_means = []
+    sky_times = []
+
+    #da_sub = da_sub.sortby("d2_mkid_frequency")
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    if obsid is not None:
+        pwv_interp = atmosphere.getInterpolatorPWV(obsid)
+        atm_interp = atmosphere.getInterpolatorATM()
+    
+    print(_green("Calculating chunk averages in beam B..."))
+    for i, chunk in enumerate(idx_rem_B):
+        print(_green(f"Chunk {i} / {len(idx_rem_B)}", bold=False), end= "\r")
+        sky_means.append(np.nanmedian(da_sub[chunk], axis=0))
+        sky_times.append(np.average(da_sub.time.values.astype('datetime64[ms]').astype('int')[chunk]))
+
+    sky_means = np.array(sky_means)
+    sky_times = np.array(sky_times)
+
+    idx_sort = np.argsort(sky_times)
+    sky_times = np.sort(sky_times)
+    sky_means = sky_means[idx_sort]
+
+    print(_green("Removing atmosphere baseline from beam A..."))
+    atm_src_interp = interp.interp1d(sky_times, sky_means, fill_value='extrapolate', axis=0)
+    
+    src_idxs = np.array([x for xs in idx_rem_A for x in xs])
+    src_times = da_sub.time.values[src_idxs].astype('datetime64[ms]').astype('int')
+
+    atm_src = atm_src_interp(src_times)
+
+    da_sub[src_idxs] -= atm_src
+    da_sub_red = da_sub[src_idxs]
+    
+    average = np.nanmean(da_sub_red.data, axis=0)
+    variance = np.nanvar(da_sub_red.data, axis=0)
+
+    if obsid is not None:
+        pwv = np.nanmean(pwv_interp(src_times))
+        secz = np.nanmean(da_sub_red.secz.values)
+        eta_atm_arr = atm_interp(freq, pwv, grid=False)**secz
+
+        da_sub_red /= eta_atm_arr
+
+        average /= eta_atm_arr
+        variance /= (eta_atm_arr)**2
+
+    if average_TOD:
+        return average, variance, master_id, freq
+
+    else:
+        return da_sub_red, master_id, freq
+
+def stack_spectra(npy_loc, obsids):
+    """
+    Stack a collection of measured pswsc spectra on top of each other.
+
+    @param npy_loc Directory containing fully averaged analysis npy files.
+    @param obsids List of obsids to be included in the stacking.
+
+    @returns Array containing average stacked signal, inverse variance weighted.
+    @returns Array containing variances of stacked averages.
+    @returns master_ids Master indexes for each entry in average and variance.
+    @returns freq Array with channel frequencies corresponding to master_ids
+    """
+
+    import matplotlib.pyplot as plt
+
+    obsid_good = []
+
+    # In this loop we just set length of output frequency array
+    first = True
+    for i, obs in enumerate(obsids):
+        try:
+            chan = np.load(f"npys/{obs}_chan.npy")
+            freq = np.load(f"npys/{obs}_freq.npy")
+            obsid_good.append(obs)
+        except:
+            print(_yellow(f"Could not find obsid {obs}, skipping..."))
+            continue
+        
+        if first:
+            tot_chan = chan
+            first = False
+            continue
+        
+        tot_chan = np.union1d(tot_chan, chan)
+
+    observation_avg = np.empty((len(obsid_good), tot_chan.size))
+    observation_var = np.empty((len(obsid_good), tot_chan.size))
+    tot_freq = np.empty((len(obsid_good), tot_chan.size))
+
+    observation_avg[:] = np.nan
+    observation_var[:] = np.nan
+    tot_freq[:] = np.nan
+
+    for i, obs in enumerate(obsid_good):
+        avg = np.load(f"npys/{obs}_avg.npy")
+        var = np.load(f"npys/{obs}_var.npy")
+        chan = np.load(f"npys/{obs}_chan.npy")
+        freq = np.load(f"npys/{obs}_freq.npy")
+        
+        idxs, idx_in_total, idx_in_current = np.intersect1d(tot_chan, chan, assume_unique=True, return_indices=True)
+
+        assert(idx_in_total.size == avg.size)
+
+        observation_avg[i,idx_in_total] = avg
+        observation_var[i,idx_in_total] = var
+        tot_freq[i,idx_in_total] = freq
+    
+    #avg_arr = np.nanmean(observation_avg, axis=0)
+    #var_arr = np.nanvar(observation_var, axis=0)
+    #freq_arr = np.nanmean(tot_freq, axis=0)
+    #return avg_arr, var_arr, tot_chan, freq_arr
+
+    freq_arr = np.nanmean(tot_freq, axis=0)
+
+    weights = np.nansum(1/observation_var, axis=0)
+
+    avg_arr = np.nansum(observation_avg/observation_var, axis=0) / weights
+    var_arr = 1 / weights
+
+    return avg_arr, var_arr, tot_chan, freq_arr
+
+def rebin(center_freqs, bw, in_avg, in_var, in_freq):
+
+    avg_binned = []
+    var_binned = []
+    freq_binned = []
+
+    for cfreq in center_freqs:
+        mask = np.absolute(in_freq - cfreq) < bw
+        avg_in_bin = in_avg[mask]
+        var_in_bin = in_var[mask]
+
+        #weights = np.nansum(1/var_in_bin)
+        avg_bin = np.nanmean(avg_in_bin)#np.nansum(avg_in_bin/var_in_bin) / weights
+        var_bin = np.nanmean(var_in_bin)#1 / weights
+        avg_freq = np.nanmean(in_freq[mask])
+
+        avg_binned.append(avg_bin)
+        var_binned.append(var_bin)
+        freq_binned.append(avg_freq)
+
+    return np.array(avg_binned), np.array(var_binned), np.array(freq_binned)
+
+
+
+

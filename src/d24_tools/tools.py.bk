@@ -1,0 +1,338 @@
+import decode as dc
+import numpy as np
+import xarray as xr
+import scipy.interpolate as interp
+from datetime import datetime, timedelta
+
+import copy
+from d24_tools import colors
+from d24_tools import atmosphere
+
+def _boldgreen(string):
+    """
+    Formatter for bold green terminal output.
+
+    @param string String to be formatted.
+
+    @returns Formatted string
+    """
+
+    return colors.GREEN + colors.BOLD + string + colors.END
+
+def _consecutive(data, stepsize=1):
+    """
+    Take numpy array and return list with arrays containing consecutive blocks
+    
+    @param data Array in which consecutive chunks are to be located.
+
+    @returns List with arrays of consecutive chunks of data as elements.
+    """
+
+    return np.split(data, np.where(np.diff(data) != stepsize)[0]+1)
+
+def despike(da, include=["ON", "OFF"], by="state", flatten=False):
+    """
+    Despike a TOD and return index chunks belonging to beam A and B, given an inclusion string/list of strings.
+
+    @param da Data array containing TOD
+    @param include String or list of strings containing inclusion parameters.
+        For pswsc observations, ["ON", "OFF"] is recommended.
+        For daisy scans, use "SCAN".
+    @param by Label to include by. Default is 'state'
+    @param flatten Flatten output list of index chunks. Default is False
+    
+    @returns Data array with only the included labels
+    @returns List of index chunks belonging to beam A, despiked, indexed in returned data array
+        If flatten=True, will return numpy array containing indices
+    @returns List of index chunks belonging to beam B, despiked, indexed in returned data array
+        If flatten=True, will return numpy array containing indices
+    """
+
+    # Select the part of the observation in the OFF position, so that beam A is looking at the atmosphere
+    da_sub = dc.select.by(da, by, include=include)
+    
+    idx_A = np.squeeze(np.argwhere(da_sub.beam.data == "A"))
+    idx_B = np.squeeze(np.argwhere(da_sub.beam.data == "B"))
+
+    all_idx = np.arange(da_sub.shape[0])
+    
+    assert(all_idx.size == (idx_A.size + idx_B.size))
+    
+    chunk_list_A = _consecutive(idx_A)
+    chunk_list_B = _consecutive(idx_B)
+
+    chunk_list_despiked_A = []
+    chunk_list_despiked_B = []
+
+    print(_boldgreen("despiking TOD..."))
+    for idx_chunk_A in chunk_list_A:
+        if idx_chunk_A.size > 3:
+            chunk_list_despiked_A.append(idx_chunk_A[1:-1])
+        
+    for idx_chunk_B in chunk_list_B:
+        if idx_chunk_B.size > 3:
+            chunk_list_despiked_B.append(idx_chunk_B[1:-1])
+
+    if flatten:
+        chunk_list_despiked_A = np.array([x for xs in chunk_list_despiked_A for x in xs])
+        chunk_list_despiked_B = np.array([x for xs in chunk_list_despiked_B for x in xs])
+    
+    return da_sub, chunk_list_despiked_A, chunk_list_despiked_B
+
+def remove_overshoot(da_sub, idx_A, idx_B, dAz, dEl, buff=0.5):
+    """
+    Remove overshoot in chunks of data array of pswsc observation type.
+    Essentially, it only selects the indices inside the data array for which the dAz and dEl agree with the given offset.
+    
+    @param da_sub Data array that has already been subselected using the despike function.
+    @param idx_A List (or numpy array, if flat) containing despiked beam A indices
+    @param idx_B List (or numpy array, if flat) containing despiked beam B indices
+    @param dAz Azimuth value around which to select good points
+    @param dEl Elevation values around which to select good points
+    @param buff Range of angle in arcsec around dAz and dEl in which to select good points. Default is 1
+    
+    @returns List (or numpy array if idx_A was flat) containing despiked and on-point beam A indices.
+    @returns List (or numpy array if idx_B was flat) containing despiked and on-point beam B indices.
+    """
+
+    dAz_OFF = dAz - 234
+
+    # Include state in condition, so that indices are still in da_sub
+    cond_ON = (np.absolute(da_sub.lon.data - dAz) < buff) & (np.absolute(da_sub.lat.data - dEl) < buff) & (da_sub.state.data == "ON")
+    cond_OFF = (np.absolute(da_sub.lon.data - dAz_OFF) < buff) & (np.absolute(da_sub.lat.data - dEl) < buff) & (da_sub.state.data == "OFF")
+    
+    idx_good_ON = np.squeeze(np.argwhere(cond_ON))
+    idx_good_OFF = np.squeeze(np.argwhere(cond_OFF))
+    
+    print(_boldgreen(f'Overshoot threshold is {buff}"'))
+
+    if isinstance(idx_A, list):
+        idx_rem_A = copy.deepcopy(idx_A)
+        idx_rem_B = copy.deepcopy(idx_B)
+        
+        # The index lists are indeed lists with chunks. 
+        # Now, we iterate over each chunk, determine if the chunk is in ON or OFF, and check accordingly if it is good.
+        print(_boldgreen("Removing overshoot..."))
+        for i, chunk in enumerate(idx_A):
+            print(colors.GREEN + f"Beam A, chunk {i} / {len(idx_A)}" + colors.END, end="\r")
+            _state = da_sub.state[chunk[0]]
+            if _state == "ON":
+                new_chunk = np.intersect1d(chunk, idx_good_ON, assume_unique=True)
+            else:
+                new_chunk = np.intersect1d(chunk, idx_good_OFF, assume_unique=True)
+            
+            idx_rem_A[i] = new_chunk
+        
+        for i, chunk in enumerate(idx_B):
+            print(colors.GREEN + f"Beam B, chunk {i} / {len(idx_B)}" + colors.END, end= "\r")
+            _state = da_sub.state[chunk[0]]
+            if _state == "ON":
+                new_chunk = np.intersect1d(chunk, idx_good_ON, assume_unique=True)            
+            else:
+                new_chunk = np.intersect1d(chunk, idx_good_OFF, assume_unique=True)
+            
+            idx_rem_B[i] = new_chunk
+
+    else:
+        # Now the list is a flat numpy array, which makes it alot easier.
+        idx_rem_A_ON = np.intersect1d(idx_A, idx_good_ON, assume_unique=True)
+        idx_rem_A_OFF = np.intersect1d(idx_A, idx_good_OFF, assume_unique=True)
+
+        idx_rem_A = np.sort(np.concatenate(idx_rem_A_ON, idx_rem_A_OFF))
+
+        idx_rem_B_ON = np.intersect1d(idx_B, idx_good_ON, assume_unique=True)
+        idx_rem_B_OFF = np.intersect1d(idx_B, idx_good_OFF, assume_unique=True)
+        
+        idx_rem_B = np.sort(np.concatenate(idx_rem_B_ON, idx_rem_B_OFF))
+
+    return idx_rem_A, idx_rem_B
+
+def reduce_chops_to_nod(da_sub, idx_rem_A, idx_rem_B, correct_atmosphere=True, obsid=None):
+    """
+    Reduce a pswsc sub data array to a data array containing subtracted and averaged on-source chop values.
+    Subtraction happens by linear interpolation on off-source chop averages.
+    The averaging happens to the level of a nod. 
+    Per nod, the average timestamp is calculated and assigned to the nod average. 
+    Optionally, atmospheric correction can be applied to each nod. 
+    In this case, the average PWV of all on-source chops inside the nod is calculated and used to calculate the atmosphere-corrected antenna temperature.
+    For this, currently the APEX PWV is used, together with the ATM transmission tool.
+
+    @param da_sub Data array that has been despiked and overshoot-removed.
+    @param idx_rem_A Indices of timestamps in beam A, despiked and overshoot-removed.
+    @param idx_rem_B Indices of timestamps in beam B, despiked and overshoot-removed.
+    @param correct_atmosphere Apply atmospheric correction. Default is True.
+    
+    @returns Array with the average signal per nod, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+    
+    idx_rem_A = [x for x in idx_rem_A if x.size != 0]
+    idx_rem_B = [x for x in idx_rem_B if x.size != 0]
+
+    sky_means = []
+    sky_times = []
+
+    #da_sub = da_sub.sortby("d2_mkid_frequency")
+
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    if correct_atmosphere:
+        pwv_interp = atmosphere.getInterpolatorPWV(obsid)
+        atm_interp = atmosphere.getInterpolatorATM()
+    
+    print(_boldgreen("Calculating chunk averages in off-source beams..."))
+    for i, chunk in enumerate(idx_rem_A):
+        print(colors.GREEN + f"Beam A, chunk {i} / {len(idx_rem_A)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "ON":
+                continue
+        sky_means.append(np.nanmean(da_sub[chunk], axis=0))
+        sky_times.append(np.average(da_sub.time.values.astype('datetime64[ms]').astype('int')[chunk]))
+    
+    for chunk in idx_rem_B:
+        print(colors.GREEN + f"Beam B, chunk {i} / {len(idx_rem_A)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "OFF":
+                continue
+        sky_means.append(np.nanmean(da_sub[chunk], axis=0))
+        sky_times.append(np.average(da_sub.time.values.astype('datetime64[ms]').astype('int')[chunk]))
+
+    sky_means = np.array(sky_means)
+    sky_times = np.array(sky_times)
+
+    idx_sort = np.argsort(sky_times)
+    sky_times = np.sort(sky_times)
+    sky_means = sky_means[idx_sort]
+
+    # Now I have array with average off-source values, as function of time
+
+    atm_src_interp = interp.interp1d(sky_times, sky_means, fill_value='extrapolate', axis=0)
+    
+    src_idxs = []
+    src_times = []
+
+    print(_boldgreen("Removing atmosphere baseline from on-source beam..."))
+    for i, chunk in enumerate(idx_rem_A):
+        print(colors.GREEN + f"Beam A, chunk {i} / {len(idx_rem_A)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "OFF":
+                continue
+
+        for _idx in chunk:
+            src_idxs.append(_idx)
+            src_times.append(da_sub.time.values.astype('datetime64[ms]').astype('int')[_idx])
+    
+    for chunk in idx_rem_B:
+        print(colors.GREEN + f"Beam B, chunk {i} / {len(idx_rem_A)}" + colors.END, end= "\r")
+        if da_sub.state.data[chunk[0]] == "ON":
+                continue
+        for _idx in chunk:
+            src_idxs.append(_idx)
+            src_times.append(da_sub.time.values.astype('datetime64[ms]').astype('int')[_idx])
+
+    src_idxs = np.array(src_idxs)
+    src_times = np.array(src_times)
+
+    idx_sort = np.argsort(src_times)
+    src_times = np.sort(src_times)
+    src_idxs = src_idxs[idx_sort]
+    
+    atm_src = atm_src_interp(src_times)
+
+    da_sub[src_idxs] -= atm_src
+    #print(da_sub.data[src_idxs])
+    da_sub_red = da_sub[src_idxs]
+
+    
+    # We now have the data array with the atmospheric baseline removed from all on-source positions
+    # Also, only on-source timestamps are now present.
+    # We want a list to keep track of values inside a single nod for the averaging per nod
+    # Additionally, we want a list to keep track of nod averages and standard deviations
+    # Each time a new average/std pair is calculated, the temp list can be re-initialized
+
+    avg_nod_l = []
+    var_nod_l = []
+
+    current_nod = "ON"
+    idx_start_nod = 0
+    idx_end_nod = 0
+
+    print(_boldgreen("Averaging over on-source beam..."))
+    for idx in range(da_sub_red.data.shape[0]):
+        if current_nod != da_sub_red.state.values[idx]:
+            idx_end_nod = idx - 1 # Last value inside current nod
+            avg_nod = np.nanmean(da_sub_red.data[idx_start_nod:idx_end_nod+1], axis=0)
+            var_nod = np.nanvar(da_sub_red.data[idx_start_nod:idx_end_nod+1], axis=0)
+            
+            # Maybe change into average of eta_atm at some point
+            #if correct_atmosphere:
+            #    pwv = np.nanmean(pwv_interp(src_times[idx_start_nod:idx_end_nod+1]))
+            #    secz = np.nanmean(da_sub_red.secz.values[idx_start_nod:idx_end_nod+1])
+            #    print(freq)
+            #    eta_atm_arr = atm_interp(freq, pwv, grid=False)**secz
+            #    print(eta_atm_arr)
+            #    #eta_atm_avg = np.nanmean(eta_atm_arr, axis=0)
+
+            #    avg_nod /= eta_atm_arr
+            #    var_nod /= (eta_atm_arr**2)
+            
+            avg_nod_l.append(avg_nod)
+            var_nod_l.append(var_nod)
+
+            current_nod = da_sub_red.state.values[idx]
+            idx_start_nod = idx_end_nod
+
+    # Last nod in observation
+    if idx_start_nod != da_sub_red.data.shape[0]-1:
+        avg_nod = np.nanmean(da_sub_red.data[idx_start_nod:da_sub_red.data.shape[0]], axis=0)
+        var_nod = np.nanvar(da_sub_red.data[idx_start_nod:da_sub_red.data.shape[0]], axis=0)
+        
+        #if correct_atmosphere:
+        #    pwv = np.nanmean(pwv_interp(src_times[idx_start_nod:idx_end_nod+1]))
+        #    secz = np.nanmean(da_sub_red.secz.values[idx_start_nod:idx_end_nod+1])
+        #    eta_atm_arr = atm_interp(freq, pwv, grid=False)**secz
+            #eta_atm_avg = np.nanmean(eta_atm_arr, axis=0)
+
+        #    avg_nod /= eta_atm_arr
+        #    var_nod /= (eta_atm_arr**2)
+        
+        avg_nod_l.append(avg_nod)
+        var_nod_l.append(var_nod)
+
+    avg_nod_arr = np.array(avg_nod_l)
+    var_nod_arr = np.array(var_nod_l)
+    
+    # Calculate normalization for averaging and average over nods
+    norm = np.nansum(1/var_nod_arr, axis=0)
+    wsum = np.nansum(avg_nod_arr/var_nod_arr, axis=0)
+
+    weighted_spec_avg = wsum / norm    
+
+    weighted_spec_var = np.nansum(var_nod_arr, axis=0)
+    import matplotlib.pyplot as plt
+    plt.scatter(freq, weighted_spec_avg)
+    plt.show()
+
+
+    # Also return master index and frequency, for completeness
+    return weighted_spec_avg, weighted_spec_var, master_id, freq
+
+def stack_spectra(npy_loc, obsids):
+    """
+    Stack a collection of measured spectra on top of each other
+    """
+
+    for i, obs in enumerate(obsids):
+        chan = np.load(f"npys/{obs}_chan.npy")
+        freq = np.load(f"npys/{obs}_freq.npy")
+        if i == 0:
+            master_ids = chan 
+            master_freq = freq
+            continue
+
+        master_ids = np.union1d(master_ids, chan)
+        master_freq = np.union1d(master_freq, freq)
+
+    print(master_ids.shape)
+    print(master_freq.shape)
+
