@@ -50,7 +50,7 @@ def remove_bad_indices(da, indices):
 
 def despike(da, include=["ON", "OFF"], by="state"):
     """
-    Despike a TOD and return index chunks belonging to beam A and B, given an inclusion string/list of strings.
+    Despike a TOD and return despiked data array, given an inclusion string/list of strings.
 
     @param da Data array containing TOD
     @param include String or list of strings containing inclusion parameters.
@@ -110,11 +110,34 @@ def remove_overshoot(da_sub, buff=0.5):
     _overshoot_buffed = partial(methods._overshoot_per_scan, buff=buff)
     return da_sub.groupby("scan").map(_overshoot_buffed)
 
+#### Reduction and averaging
+def reduce_observation_still(da_sub):
+    """
+    Average a still observation, without AB chopping.
+    Note that any including/excluding to the data array needs to be done BEFORE passing the array to this method.
+    
+    @param da_sub Data array on which potentially include/exclude operations have been performed.
+
+    @returns Array with the average signal, for each KID.
+    @returns Array with the standard deviation, for each KID.
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+    
+    master_id = da_sub.chan.values
+    freq = da_sub.d2_mkid_frequency.values
+
+    spec_avg = np.nanmean(da_sub.data, axis=0)
+    spec_var = np.nanvar(da_sub.data, axis=0)
+
+    return spec_avg, spec_var, master_id, freq    
+
 def reduce_observation_full(da_sub, conv_factor=1):
     """
     Average a pswsc observation over the full observation.
 
     @param da_sub Data array that has been despiked and overshoot-removed.
+    @param conv_factor A custom conversion factor, if something other than brightness temperature is desired.
 
     @returns Array with the average signal, for each KID.
     @returns Array with the standard deviation, for each KID.
@@ -138,15 +161,18 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1):
     The averaging is 
 
     @param da_sub Data array that has been despiked and overshoot-removed.
-    @param resolution Unit to average over. Default is 'nod'.
-        If 'nod' : Apply variance weighted averaging over nod cycles.
-        If 'obs' : Apply averaging over full observation
+    @parm num_nods Number of nods to include in each average. Must be an even number.
+    @param conv_factor A custom conversion factor, if something other than brightness temperature is desired.
 
     @returns Array with the average signal, for each KID.
     @returns Array with the standard deviation, for each KID.
     @returns Array with master indices for each KID.
     @returns Array with filter frequencies, in GHz, for each KID.
     """
+
+    if not (num_nods % 2) == 0:
+        print(f"num_nods needs to be even, {num_nods} is not even!")
+        exit(1)
 
     master_id = da_sub.chan.values
     freq = da_sub.d2_mkid_frequency.values
