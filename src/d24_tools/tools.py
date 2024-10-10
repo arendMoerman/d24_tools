@@ -55,7 +55,7 @@ def despike(da, include=["ON", "OFF"], by="state"):
     @param da Data array containing TOD
     @param include String or list of strings containing inclusion parameters.
         For pswsc observations, ["ON", "OFF"] is recommended.
-        For daisy scans, use "SCAN".
+        For daisy scans or still AB chopping, use "SCAN".
     @param by Label to include by. Default is 'state'
     
     @returns Despiked data array with only the included labels
@@ -107,11 +107,10 @@ def remove_overshoot(da_sub, buff=0.5):
     @returns List (or numpy array if idx_B was flat) containing despiked and on-point beam B indices.
     """
 
-    _overshoot_buffed = partial(methods._overshoot_per_scan, buff=buff)
-    return da_sub.groupby("scan").map(_overshoot_buffed)
+    return da_sub.groupby("scan").map(methods._overshoot_per_scan, args=(buff,))
 
 #### Reduction and averaging
-def reduce_observation_still(da_sub):
+def reduce_observation_still(da_sub, thres=None):
     """
     Average a still observation, without AB chopping.
     Note that any including/excluding to the data array needs to be done BEFORE passing the array to this method.
@@ -129,6 +128,13 @@ def reduce_observation_still(da_sub):
 
     spec_avg = np.nanmean(da_sub.data, axis=0)
     spec_var = np.nanvar(da_sub.data, axis=0)
+
+    if thres is not None:
+        mask = (spec_avg < thres)
+        spec_avg = spec_avg[mask]
+        spec_var = spec_var[mask]
+        master_id = master_id[mask]
+        freq = freq[mask]
 
     return spec_avg, spec_var, master_id, freq    
 
@@ -151,7 +157,10 @@ def reduce_observation_full(da_sub, conv_factor=1):
     da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
 
     spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
-    spec_var = np.nanmean(da_sub["var"].data, axis=0)
+
+    N = da_sub["avg"].data.shape[0]
+        
+    spec_var = np.nansum(da_sub["var"].data, axis=0) / N**2
 
     return spec_avg, spec_var, master_id, freq
 
@@ -193,7 +202,7 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1):
             cycle_var[i] += spec_var[i*num_nods + j]
 
     cycle_avg /= num_nods
-    cycle_var /= num_nods
+    cycle_var /= num_nods**2
 
     weight = np.nansum(1 / cycle_var, axis=0)
     spec_avg = np.nansum(cycle_avg / cycle_var, axis=0) / weight
