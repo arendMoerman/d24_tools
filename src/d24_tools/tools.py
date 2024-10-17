@@ -34,7 +34,6 @@ def _yellow(string, bold=True):
         return colors.YELLOW + colors.BOLD + string + colors.END
     return colors.YELLOW + string + colors.END
 
-
 def remove_bad_indices(da, indices):
     """
     Remove a list/array of master indices from a data array by setting them to NaN.
@@ -210,101 +209,19 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1):
     
     return spec_avg, spec_var, master_id, freq
 
-def reduce_observation(da_sub, resolution="nod", conv_factor=1):
-    """
-    Average ABBA off-source and on-source beams and subtract.
-
-    @param da_sub Data array that has been despiked and overshoot-removed.
-    @param resolution Unit to average over. Default is 'nod'.
-        If 'nod' : Apply variance weighted averaging over nod cycles.
-        If 'obs' : Apply averaging over full observation
-
-    @returns Array with the average signal, for each KID.
-    @returns Array with the standard deviation, for each KID.
-    @returns Array with master indices for each KID.
-    @returns Array with filter frequencies, in GHz, for each KID.
-    """
-
+def reduce_daisy(da_sub, conv_factor=1):
+    da_sub = select.by(da_sub, "state", exclude="GRAD")
+    
     master_id = da_sub.chan.values
     freq = da_sub.d2_mkid_frequency.values
 
-    da_sub = da_sub.groupby("scan").map(_subtract_per_scan, args=(conv_factor,))
+    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
 
-    if resolution == 'obs':
-        spec_avg = np.nanmean(da_sub["avg_first"].data, axis=0)
-        spec_var = np.nanvar(da_sub["avg_first"].data, axis=0)
-    
-    elif resolution == 'nod':
-        scan_labels = da_sub["avg_first"].scan.data.astype(int)
-        args_sort = np.argsort(scan_labels)
+    spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
 
-        spec_avg_first = da_sub["avg_first"].data[args_sort]
-        spec_var_first = da_sub["var_first"].data[args_sort]
+    N = da_sub["avg"].data.shape[0]
         
-        spec_avg_last = da_sub["avg_last"].data[args_sort]
-        spec_var_last = da_sub["var_last"].data[args_sort]
-
-        avg_l = []
-        var_l = []
-
-        for i in range(len(args_sort)):
-            avg_l.append(spec_avg_first[i])
-            avg_l.append(spec_avg_last[i])
-            
-            var_l.append(spec_var_first[i])
-            var_l.append(spec_var_last[i])
-
-        running_avg = avg_l[0]
-        running_var = var_l[0]
-
-        cycle_avg = []
-        cycle_var = []
-
-        n = 0
-        nods = 0
-        N = 5
-        for i in range(1,len(avg_l) - 1):
-            running_avg += avg_l[i]
-            running_var += var_l[i]
-
-            n += 1
-            if n == 4:
-                cycle_avg.append(running_avg / N)
-
-                N = 4
-                n = 0
-
-        print(len(avg_l))
-
-        assert(len(args_sort) % 2 == 0)
-
-        cycle_store_avg = []
-        cycle_store_var = []
-
-        cycle_store_avg.append((spec_avg_first[0]+spec_avg_last[0]) / 2)
-
-        cycle_avg = np.zeros((spec_avg.shape[0] // 4, spec_avg.shape[1]))
-        cycle_var = np.zeros((spec_var.shape[0] // 4, spec_var.shape[1]))
-        for i in range(len(args_sort) // 4):
-            for j in range(4):
-                cycle_avg[i] += spec_avg[i*4 + j]
-                cycle_var[i] += spec_var[i*4 + j]
-
-        cycle_avg /= 4
-        cycle_var /= 4
-
-        weight = np.nansum(1 / cycle_var, axis=0)
-        spec_avg = np.nansum(cycle_avg / cycle_var, axis=0) / weight
-        spec_var = 1 / weight
-
-        spec_avg = np.nanmean(cycle_avg, axis=0)
-        spec_var = np.nanvar(cycle_avg, axis=0)
-
-        print(spec_avg.shape)
-
-    else:
-        print(f"Unknown value {resolution} for resolution!")
-        exit(1)
+    spec_var = np.nansum(da_sub["var"].data, axis=0) / N**2
 
     return spec_avg, spec_var, master_id, freq
 
