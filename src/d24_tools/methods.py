@@ -11,7 +11,7 @@ from functools import partial
 
 CHOPSEP = -234
 
-def _subtract_per_scan_backup(dems, conv_factor=1):
+def _subtract_per_scan_var_direct(dems, conv_factor=1):
     """Apply source-sky subtraction to a single-scan DEMS."""
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
@@ -35,7 +35,7 @@ def _subtract_per_scan_backup(dems, conv_factor=1):
     
     return ds_out
 
-def _subtract_per_scan(dems, conv_factor=1):
+def _subtract_per_scan_var_A(dems, conv_factor=1):
     """Apply source-sky subtraction to a single-scan DEMS."""
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
@@ -66,6 +66,62 @@ def _subtract_per_scan(dems, conv_factor=1):
     return ds_out
 
 def _subtract_per_scan_var_split(dems, conv_factor=1):
+    """
+    Apply source-sky subtraction to a single-scan DEMS.
+    This version calculates the variance for beam B by using B' and B'' separately.
+    """
+    if len(states := np.unique(dems.state)) != 1:
+        raise ValueError("State must be unique.")
+    
+    t_amb = np.nanmean(dems.temperature.data)
+
+    if (state := states[0]) == "ON":
+        src = dc.select.by(dems, "beam", include="A")
+        sky = dc.select.by(dems, "beam", include="B")
+        
+        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+        average = signal.mean("time")
+        variance = signal.var("time")
+
+    # In the OFF state, need to subdivide between B' and B''
+    if state == "OFF":
+        arg_sort = np.argsort(dems.time.values)
+        
+        idx_B = np.squeeze(np.argwhere(dems.beam.values[arg_sort] == "B"))
+        chunk_list_B = _consecutive(idx_B)
+
+        list_Bpr = []
+        list_Bdpr = []
+
+        for i, chunk in enumerate(chunk_list_B):
+            subl = []
+            for item in chunk:
+                subl.append(item)
+            if i % 2 == 0: # even -> Bpr
+                list_Bpr += subl
+            else:
+                list_Bdpr += subl
+
+        src_Bpr = dems[list_Bpr]
+        src_Bdpr = dems[list_Bdpr]
+
+        src = dc.select.by(dems, "beam", include="B")
+        sky = dc.select.by(dems, "beam", include="A")
+        
+        signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        
+        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+        average = signal.mean("time")
+        variance = (signal_pr.var("time") + signal_dpr.var("time")) / 4
+
+    ds_out = xr.merge([average.rename("avg"), variance.rename("var")])
+    
+    return ds_out
+
+def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
     """
     Apply source-sky subtraction to a single-scan DEMS.
     This version calculates the variance for beam B by using B' and B'' separately.

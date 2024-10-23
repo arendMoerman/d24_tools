@@ -12,11 +12,15 @@ from d24_tools import methods
 from functools import partial
 KB = 1.380649e-23
 
-def obs_to_nod_avg(da_sub, conv_factor, num_nods=2):
+def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0):
     """
     Reduce a full observation to nod (full ABBA) averages
 
     @param da_sub Despiked and overshoot-removed.
+    @param var_B Which method to use to calculate the variance in beam B for OFF nods:
+        0 : directly over beam B' and B''
+        1 : over B' and B'' separately and then average
+        2 : use variance of beam A and convert to beam B
 
     @returns 2D Numpy array containing ABBA cycles along first axis and frequency along second axis.
     """
@@ -24,8 +28,12 @@ def obs_to_nod_avg(da_sub, conv_factor, num_nods=2):
     master_id = da_sub.chan.values
     freq = da_sub.d2_mkid_frequency.values
 
-    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
-    
+    if var_B == 0:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor,))
+    elif var_B == 1:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
+    elif var_B == 2:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
 
     scan_labels = da_sub["avg"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)
