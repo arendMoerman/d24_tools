@@ -12,7 +12,17 @@ from functools import partial
 CHOPSEP = -234
 
 def _subtract_per_scan_var_direct(dems, conv_factor=1):
-    """Apply source-sky subtraction to a single-scan DEMS."""
+    """
+    Apply source-sky subtraction to a single-scan DEMS.
+    This version subtracts the off-source beam average from the on-source timestream, 
+    after which the variance in the on-source beam is directly calculated from the on-source stream.
+    
+    @param dems Data array which has been grouped.
+    @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    
+    @returns Data array containing on-source nod average and variance
+    """
+
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
     
@@ -36,7 +46,16 @@ def _subtract_per_scan_var_direct(dems, conv_factor=1):
     return ds_out
 
 def _subtract_per_scan_var_A(dems, conv_factor=1):
-    """Apply source-sky subtraction to a single-scan DEMS."""
+    """
+    Apply source-sky subtraction to a single-scan DEMS.
+    This version subtracts the off-source beam average from the on-source beam, but solely uses beam A for variance calculations. 
+
+    @param dems Data array which has been grouped.
+    @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    
+    @returns Data array containing on-source nod average and variance
+    """
+    
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
     
@@ -68,7 +87,13 @@ def _subtract_per_scan_var_A(dems, conv_factor=1):
 def _subtract_per_scan_var_split(dems, conv_factor=1):
     """
     Apply source-sky subtraction to a single-scan DEMS.
-    This version calculates the variance for beam B by using B' and B'' separately.
+    This version subtracts the off-source beam average from the on-source timestream, 
+    but calculates the variances for B' and B'' separately in OFF nods, combining them at the end. 
+    
+    @param dems Data array which has been grouped.
+    @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    
+    @returns Data array containing on-source nod average and variance
     """
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
@@ -124,7 +149,14 @@ def _subtract_per_scan_var_split(dems, conv_factor=1):
 def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
     """
     Apply source-sky subtraction to a single-scan DEMS.
-    This version calculates the variance for beam B by using B' and B'' separately.
+    This version subtracts the off-source beam average from the on-source timestream, 
+    but calculates the variances for B' and B'' separately in OFF nods, combining them at the end. 
+    Also, the variance is calculated from the chop averages instead of the splitted timestreams, in order to eliminate the internal chop modulation.
+    
+    @param dems Data array which has been grouped.
+    @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    
+    @returns Data array containing on-source nod average and variance
     """
     if len(states := np.unique(dems.state)) != 1:
         raise ValueError("State must be unique.")
@@ -147,31 +179,36 @@ def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
         idx_B = np.squeeze(np.argwhere(dems.beam.values[arg_sort] == "B"))
         chunk_list_B = _consecutive(idx_B)
 
-        list_Bpr = []
-        list_Bdpr = []
+        src_Bpr = []
+        src_Bdpr = []
 
         for i, chunk in enumerate(chunk_list_B):
             subl = []
             for item in chunk:
                 subl.append(item)
             if i % 2 == 0: # even -> Bpr
-                list_Bpr += subl
+                src_Bpr.append(dems[subl].mean("time").data)
             else:
-                list_Bdpr += subl
+                src_Bdpr.append(dems[subl].mean("time").data)
 
-        src_Bpr = dems[list_Bpr]
-        src_Bdpr = dems[list_Bdpr]
+        src_Bpr = np.array(src_Bpr)
+        src_Bdpr = np.array(src_Bdpr)
+        print(src_Bpr.shape)
+        print(src_Bdpr.shape)
 
         src = dc.select.by(dems, "beam", include="B")
         sky = dc.select.by(dems, "beam", include="A")
         
-        signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
-        signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        print(sky.mean("time").data.shape)
+
+        signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time").data))
+        signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time").data))
         
         signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
 
         average = signal.mean("time")
-        variance = (signal_pr.var("time") + signal_dpr.var("time")) / 4
+        variance = signal.var("time")
+        variance.data = (np.nanvar(signal_pr, axis=0) + np.nanvar(signal_dpr, axis=0)) / 4
 
     ds_out = xr.merge([average.rename("avg"), variance.rename("var")])
     

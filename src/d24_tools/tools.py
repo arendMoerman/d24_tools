@@ -137,7 +137,7 @@ def reduce_observation_still(da_sub, thres=None):
 
     return spec_avg, spec_var, master_id, freq    
 
-def reduce_observation_full(da_sub, conv_factor=1):
+def reduce_observation_full(da_sub, conv_factor=1, var_B=0):
     """
     Average a pswsc observation over the full observation.
 
@@ -152,8 +152,15 @@ def reduce_observation_full(da_sub, conv_factor=1):
 
     master_id = da_sub.chan.values
     freq = da_sub.d2_mkid_frequency.values
-
-    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
+    
+    if var_B == 0:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor,))
+    elif var_B == 1:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
+    elif var_B == 2:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+    elif var_B == 3:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
 
     spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
 
@@ -175,6 +182,7 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0):
         0 : directly over beam B' and B''
         1 : over B' and B'' separately and then average
         2 : use variance of beam A and convert to beam B
+        3 : same as 1, but then variance of chop averages
 
     @returns Array with the average signal, for each KID.
     @returns Array with the standard deviation, for each KID.
@@ -195,6 +203,8 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0):
         da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
     elif var_B == 2:
         da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+    elif var_B == 3:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
 
     scan_labels = da_sub["avg"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)

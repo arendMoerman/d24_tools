@@ -34,6 +34,8 @@ def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0):
         da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
     elif var_B == 2:
         da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+    elif var_B == 3:
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
 
     scan_labels = da_sub["avg"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)
@@ -49,6 +51,6 @@ def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0):
             cycle_var[i] += spec_var[i*num_nods + j]
 
     cycle_avg /= num_nods
-    cycle_var /= num_nods
+    cycle_var /= num_nods**2
 
     return cycle_avg, cycle_var, master_id, freq

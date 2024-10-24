@@ -1,5 +1,6 @@
 import decode as dc
 from d24_tools import tools as d24tools
+import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     # This is an example script, which will probably FAIL when you try to run it, unless you have the following obsid zarr.zip file in your cwd.
@@ -18,21 +19,5 @@ if __name__ == "__main__":
     da_sub = d24tools.despike(da_sub)
     da_sub = d24tools.remove_overshoot(da_sub)
     
-    avg,var,chan,freq = d24analysis.obs_to_nod_avg(da_sub, factor)
-
-    num_nods = avg.shape[0]
-
-    fig, ax = plt.subplots(num_nods,1)
-
-    for i in range(num_nods):
-        ax[i].errorbar(freq, avg[i,:], var[i,:], fmt="o")
-    plt.show()
-    
-    fig, ax = plt.subplots(2,1)
-    for i in range(num_nods):
-        ax[0].plot(freq[arg_sort], avg[i,arg_sort], label=f"cycle {i}")
-        #ax[1].plot(freq[arg_sort], avg[i,arg_sort]/np.sqrt(var[i,arg_sort]))
-        ax[1].plot(freq[arg_sort], 1 / var[i, arg_sort])
-    plt.legend()
-    plt.show()
+    avg,var,chan,freq = d24tools.reduce_observation_full(da_sub)
 
