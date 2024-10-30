@@ -11,7 +11,7 @@ from functools import partial
 
 CHOPSEP = -234
 
-def _subtract_per_scan_var_direct(dems, conv_factor=1):
+def _subtract_per_scan_var_direct(dems, conv_factor, correct_atm):
     """
     Apply source-sky subtraction to a single-scan DEMS.
     This version subtracts the off-source beam average from the on-source timestream, 
@@ -36,7 +36,11 @@ def _subtract_per_scan_var_direct(dems, conv_factor=1):
         src = dc.select.by(dems, "beam", include="B")
         sky = dc.select.by(dems, "beam", include="A")
 
-    signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+    if correct_atm:
+        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+    else:
+        signal = conv_factor * (src - sky.mean("time").data)
 
     average = signal.mean("time")
     variance = signal.var("time")
@@ -45,7 +49,7 @@ def _subtract_per_scan_var_direct(dems, conv_factor=1):
     
     return ds_out
 
-def _subtract_per_scan_var_A(dems, conv_factor=1):
+def _subtract_per_scan_var_A(dems, conv_factor, correct_atm):
     """
     Apply source-sky subtraction to a single-scan DEMS.
     This version subtracts the off-source beam average from the on-source beam, but solely uses beam A for variance calculations. 
@@ -69,12 +73,17 @@ def _subtract_per_scan_var_A(dems, conv_factor=1):
         src = dc.select.by(dems, "beam", include="B")
         sky = dc.select.by(dems, "beam", include="A")
 
-    signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+    if correct_atm:
+        prop_fac = (conv_factor * t_amb / (t_amb - sky.mean("time")))**2
+        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+    else:
+        prop_fac = conv_factor**2
+        signal = conv_factor * (src - sky.mean("time").data)
 
     average = signal.mean("time")
 
     if state == "OFF":
-        prop_fac = (conv_factor * t_amb / (t_amb - sky.mean("time")))**2
         variance = sky.var("time") * prop_fac 
 
     else:
@@ -84,7 +93,7 @@ def _subtract_per_scan_var_A(dems, conv_factor=1):
     
     return ds_out
 
-def _subtract_per_scan_var_split(dems, conv_factor=1):
+def _subtract_per_scan_var_split(dems, conv_factor, correct_atm):
     """
     Apply source-sky subtraction to a single-scan DEMS.
     This version subtracts the off-source beam average from the on-source timestream, 
@@ -104,7 +113,11 @@ def _subtract_per_scan_var_split(dems, conv_factor=1):
         src = dc.select.by(dems, "beam", include="A")
         sky = dc.select.by(dems, "beam", include="B")
         
-        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        if correct_atm:
+            signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+        else:
+            signal = conv_factor * (src - sky.mean("time").data)
 
         average = signal.mean("time")
         variance = signal.var("time")
@@ -134,11 +147,18 @@ def _subtract_per_scan_var_split(dems, conv_factor=1):
         src = dc.select.by(dems, "beam", include="B")
         sky = dc.select.by(dems, "beam", include="A")
         
-        signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
-        signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        if correct_atm:
+            signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+            signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
         
-        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+            signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
 
+        else:
+            signal_pr = conv_factor * (src_Bpr - sky.mean("time").data)
+            signal_dpr = conv_factor * (src_Bdpr - sky.mean("time").data)
+        
+            signal = conv_factor * (src - sky.mean("time").data)
+        
         average = signal.mean("time")
         variance = (signal_pr.var("time") + signal_dpr.var("time")) / 4
 
@@ -146,7 +166,7 @@ def _subtract_per_scan_var_split(dems, conv_factor=1):
     
     return ds_out
 
-def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
+def _subtract_per_scan_var_split_avgchop(dems, conv_factor, correct_atm):
     """
     Apply source-sky subtraction to a single-scan DEMS.
     This version subtracts the off-source beam average from the on-source timestream, 
@@ -167,7 +187,12 @@ def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
         src = dc.select.by(dems, "beam", include="A")
         sky = dc.select.by(dems, "beam", include="B")
         
-        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+        if correct_atm:
+            signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+        else:
+            signal = conv_factor * (src - sky.mean("time").data)
+
 
         average = signal.mean("time")
         variance = signal.var("time")
@@ -193,18 +218,21 @@ def _subtract_per_scan_var_split_avgchop(dems, conv_factor=1):
 
         src_Bpr = np.array(src_Bpr)
         src_Bdpr = np.array(src_Bdpr)
-        print(src_Bpr.shape)
-        print(src_Bdpr.shape)
 
         src = dc.select.by(dems, "beam", include="B")
         sky = dc.select.by(dems, "beam", include="A")
         
-        print(sky.mean("time").data.shape)
-
-        signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time").data))
-        signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time").data))
+        if correct_atm:
+            signal_pr = conv_factor * t_amb * (src_Bpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+            signal_dpr = conv_factor * t_amb * (src_Bdpr - sky.mean("time").data) / ((t_amb - sky.mean("time")))
         
-        signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+            signal = conv_factor * t_amb * (src - sky.mean("time").data) / ((t_amb - sky.mean("time")))
+
+        else:
+            signal_pr = conv_factor * (src_Bpr - sky.mean("time").data)
+            signal_dpr = conv_factor * (src_Bdpr - sky.mean("time").data)
+        
+            signal = conv_factor * (src - sky.mean("time").data)
 
         average = signal.mean("time")
         variance = signal.var("time")
@@ -289,3 +317,8 @@ def _consecutive(data, stepsize=1):
     """
 
     return np.split(data, np.where(np.diff(data) != stepsize)[0]+1)
+
+def _mean_in_time(dems):
+    """Similar to DataArray.mean but keeps middle time."""
+    middle = dems[len(dems) // 2 : len(dems) // 2 + 1]
+    return xr.zeros_like(middle) + dems.mean("time")

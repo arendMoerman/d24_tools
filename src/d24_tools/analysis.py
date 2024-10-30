@@ -12,7 +12,7 @@ from d24_tools import methods
 from functools import partial
 KB = 1.380649e-23
 
-def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0):
+def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0, correct_atm=True):
     """
     Reduce a full observation to nod (full ABBA) averages
 
@@ -29,13 +29,13 @@ def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0):
     freq = da_sub.d2_mkid_frequency.values
 
     if var_B == 0:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor, correct_atm))
     elif var_B == 1:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor, correct_atm))
     elif var_B == 2:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor, correct_atm))
     elif var_B == 3:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor, correct_atm))
 
     scan_labels = da_sub["avg"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)

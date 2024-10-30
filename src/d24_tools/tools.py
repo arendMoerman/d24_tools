@@ -137,7 +137,7 @@ def reduce_observation_still(da_sub, thres=None):
 
     return spec_avg, spec_var, master_id, freq    
 
-def reduce_observation_full(da_sub, conv_factor=1, var_B=0):
+def reduce_observation_full(da_sub, conv_factor=1, var_B=0, correct_atm=True):
     """
     Average a pswsc observation over the full observation.
 
@@ -154,13 +154,13 @@ def reduce_observation_full(da_sub, conv_factor=1, var_B=0):
     freq = da_sub.d2_mkid_frequency.values
     
     if var_B == 0:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor, correct_atm))
     elif var_B == 1:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor, correct_atm))
     elif var_B == 2:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor, correct_atm))
     elif var_B == 3:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor, correct_atm))
 
     spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
 
@@ -170,7 +170,7 @@ def reduce_observation_full(da_sub, conv_factor=1, var_B=0):
 
     return spec_avg, spec_var, master_id, freq
 
-def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0):
+def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0, correct_atm=True):
     """
     Average ABBA off-source and on-source beams and subtract.
     The averaging is 
@@ -198,13 +198,13 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0):
     freq = da_sub.d2_mkid_frequency.values
 
     if var_B == 0:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_direct, args=(conv_factor, correct_atm))
     elif var_B == 1:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split, args=(conv_factor, correct_atm))
     elif var_B == 2:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_A, args=(conv_factor, correct_atm))
     elif var_B == 3:
-        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor,))
+        da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan_var_split_avgchop, args=(conv_factor, correct_atm))
 
     scan_labels = da_sub["avg"].scan.data.astype(int)
     args_sort = np.argsort(scan_labels)
@@ -337,6 +337,32 @@ def rebin(center_freqs, bw, in_avg, in_var, in_freq):
 
     return np.array(avg_binned), np.array(var_binned), np.array(freq_binned)
 
+#### Raster scans
+def raster(da):
+    # subtract temporal baseline
+    master_id = da.chan.values
+    freq = da.d2_mkid_frequency.values
+    
+    da_on = dc.select.by(da, "state", include="SCAN")
+    da_off = dc.select.by(da, "state", exclude="SCAN")
+    da_base = (
+        da_off.groupby("scan")
+        .map(methods._mean_in_time)
+        .interp_like(
+            da_on,
+            method="linear",
+            kwargs={"fill_value": "extrapolate"},
+        )
+    )
+    t_atm = da_on.temperature
+    da_sub = t_atm * (da_on - da_base) / (t_atm - da_base)
 
+    # make continuum map
+    cube = dc.make.cube(
+        da_sub,
+        skycoord_grid="6 arcsec",
+        skycoord_units="arcsec",
+    )
 
+    return cube, freq
 
