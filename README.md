@@ -34,5 +34,6 @@ For daisy with AB chopping data, the procedure is as follows:
 This is currently a work in progress. This repo will be updated when new updates come out.
 
 ## Questions, remarks, and contact
-Please send to:
+Please see the `CONTRIBUTING.md` document for what to do when you want to contribute, report an issue/bug, etc.
+Other inquiries, please send to:
 A.Moerman (dash) 1 (at) tudelft (dot) nl
