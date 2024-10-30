@@ -143,6 +143,12 @@ def reduce_observation_full(da_sub, conv_factor=1, var_B=0, correct_atm=True):
 
     @param da_sub Data array that has been despiked and overshoot-removed.
     @param conv_factor A custom conversion factor, if something other than brightness temperature is desired.
+    @param var_B Which method to use to calculate the variance in beam B for OFF nods:
+        0 : directly over beam B' and B''
+        1 : over B' and B'' separately and then average
+        2 : use variance of beam A and convert to beam B
+        3 : same as 1, but then variance of chop averages
+    @param correct_atm Use atmospheric correction. Default is True.
 
     @returns Array with the average signal, for each KID.
     @returns Array with the standard deviation, for each KID.
@@ -183,6 +189,7 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0, correct_
         1 : over B' and B'' separately and then average
         2 : use variance of beam A and convert to beam B
         3 : same as 1, but then variance of chop averages
+    @param correct_atm Use atmospheric correction. Default is True.
 
     @returns Array with the average signal, for each KID.
     @returns Array with the standard deviation, for each KID.

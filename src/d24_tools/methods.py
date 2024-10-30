@@ -19,6 +19,7 @@ def _subtract_per_scan_var_direct(dems, conv_factor, correct_atm):
     
     @param dems Data array which has been grouped.
     @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    @param correct_atm Use atmospheric correction. Default is True.
     
     @returns Data array containing on-source nod average and variance
     """
@@ -56,6 +57,7 @@ def _subtract_per_scan_var_A(dems, conv_factor, correct_atm):
 
     @param dems Data array which has been grouped.
     @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    @param correct_atm Use atmospheric correction. Default is True.
     
     @returns Data array containing on-source nod average and variance
     """
@@ -101,6 +103,7 @@ def _subtract_per_scan_var_split(dems, conv_factor, correct_atm):
     
     @param dems Data array which has been grouped.
     @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    @param correct_atm Use atmospheric correction. Default is True.
     
     @returns Data array containing on-source nod average and variance
     """
@@ -175,6 +178,7 @@ def _subtract_per_scan_var_split_avgchop(dems, conv_factor, correct_atm):
     
     @param dems Data array which has been grouped.
     @param conv_factor Optional factor to convert brightness temperature to another quantity.
+    @param correct_atm Use atmospheric correction. Default is True.
     
     @returns Data array containing on-source nod average and variance
     """
