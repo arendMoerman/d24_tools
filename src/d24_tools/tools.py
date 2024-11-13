@@ -3,40 +3,22 @@ import numpy as np
 import xarray as xr
 import scipy.interpolate as interp
 from datetime import datetime, timedelta
-
+import scipy.interpolate as interp
 import copy
+
 from d24_tools import colors
 from d24_tools import atmosphere
 from d24_tools import methods
 from functools import partial
 
-def _green(string, bold=True):
-    """
-    Formatter for green terminal output.
-
-    @param string String to be formatted.
-
-    @returns Formatted string
-    """
-    if bold:
-        return colors.GREEN + colors.BOLD + string + colors.END
-    return colors.GREEN + string + colors.END
-
-def _yellow(string, bold=True):
-    """
-    Formatter for yellow terminal output.
-
-    @param string String to be formatted.
-
-    @returns Formatted string
-    """
-    if bold:
-        return colors.YELLOW + colors.BOLD + string + colors.END
-    return colors.YELLOW + string + colors.END
-
 def remove_bad_indices(da, indices):
     """
     Remove a list/array of master indices from a data array by setting them to NaN.
+
+    @param da Data array containing observation.
+    @param indices Array of master indices to be removed from da.
+
+    @returns Data array containing original data array with indices TOD set to NaN.
     """
 
     master_id = da.chan.values
@@ -56,11 +38,12 @@ def despike(da, include=["ON", "OFF"], by="state"):
         For pswsc observations, ["ON", "OFF"] is recommended.
         For daisy scans or still AB chopping, use "SCAN".
     @param by Label to include by. Default is 'state'
-    
+
     @returns Despiked data array with only the included labels
     """
 
     # Select the part of the observation in the OFF position, so that beam A is looking at the atmosphere
+    da = da.sortby("time")
     da_sub = dc.select.by(da, by, include=include)
     
     idx_A = np.squeeze(np.argwhere(da_sub.beam.data == "A"))
@@ -76,7 +59,7 @@ def despike(da, include=["ON", "OFF"], by="state"):
     chunk_list_despiked_A = []
     chunk_list_despiked_B = []
 
-    print(_green("despiking TOD..."))
+    print(colors._green("despiking TOD..."))
     for idx_chunk_A in chunk_list_A:
         if idx_chunk_A.size >= 3:
             chunk_list_despiked_A.append(idx_chunk_A[1:-1])
@@ -88,7 +71,7 @@ def despike(da, include=["ON", "OFF"], by="state"):
     chunk_list_despiked_A = np.array([x for xs in chunk_list_despiked_A for x in xs])
     chunk_list_despiked_B = np.array([x for xs in chunk_list_despiked_B for x in xs])
     
-    despiked_indices = np.concatenate((chunk_list_despiked_A, chunk_list_despiked_B))
+    despiked_indices = np.concatenate((chunk_list_despiked_A, chunk_list_despiked_B)).astype(int)
 
     da_despiked = da_sub[despiked_indices]
 
@@ -235,22 +218,75 @@ def reduce_observation_nods(da_sub, num_nods=2, conv_factor=1, var_B=0, correct_
     
     return spec_avg, spec_var, master_id, freq
 
-def reduce_daisy(da_sub, conv_factor=1):
-    da_sub = select.by(da_sub, "state", exclude="GRAD")
+# Daisy reduction tools
+def reduce_daisy(da, conv_factor=1):
+    """
+    Reduce a daisy AB scan to cube.
+
+    @param da Data array that has been despiked.
+    @param conv_factor A custom conversion factor, if something other than brightness temperature is desired.
+
+    @returns Cube containing the average per pixel
+    @returns Cube containing the variance per pixel
+    @returns Array with master indices for each KID.
+    @returns Array with filter frequencies, in GHz, for each KID.
+    """
+
+    da = da.sortby("time")
+
+    idx_A = np.squeeze(np.argwhere(da.beam.data == "A"))
+    idx_B = np.squeeze(np.argwhere(da.beam.data == "B"))
+
+    import matplotlib.pyplot as plt
+    plt.scatter(idx_A, np.ones(idx_A.size))
+    plt.scatter(idx_B, np.zeros(idx_B.size))
+    plt.show()
+
+    all_idx = np.arange(da.shape[0])
     
-    master_id = da_sub.chan.values
-    freq = da_sub.d2_mkid_frequency.values
+    assert(all_idx.size == (idx_A.size + idx_B.size))
+    
+    chunk_list_A = methods._consecutive(idx_A)
+    chunk_list_B = methods._consecutive(idx_B)
+    sky_means = []
+    sky_times = []
 
-    da_sub = da_sub.groupby("scan").map(methods._subtract_per_scan, args=(conv_factor,))
+    print(colors._green("Calculating chunk averages in off-source beam..."))
+    for i, idx_chunk_sky in enumerate(chunk_list_B):
+        print(colors._green(f"Progress: {i/len(chunk_list_B)*100:.2f} / 100"), end="\r")
+        _sky_mean = np.nanmean(da[idx_chunk_sky,:], axis=0)
 
-    spec_avg = np.nanmean(da_sub["avg"].data, axis=0)
-
-    N = da_sub["avg"].data.shape[0]
         
-    spec_var = np.nansum(da_sub["var"].data, axis=0) / N**2
 
-    return spec_avg, spec_var, master_id, freq
+        sky_means.append(_sky_mean)
+        sky_times.append(np.average(da.time.values.astype('datetime64[ms]').astype('int')[idx_chunk_sky]))
 
+    
+    sky_means = np.array(sky_means)
+    sky_times = np.array(sky_times)
+
+    flat_chunk_list_A = [x for xs in chunk_list_A for x in xs]
+
+    src_times = da.time.values.astype('datetime64[ms]').astype('int')[flat_chunk_list_A]
+    atm_src_interp = interp.interp1d(sky_times, sky_means, fill_value='extrapolate', axis=0)
+    atm_src = atm_src_interp(src_times)
+
+    t_amb = np.nanmean(da.temperature.values[idx_A])
+ 
+    src = conv_factor * t_amb * (da[flat_chunk_list_A,:] - atm_src) / (t_amb - atm_src)
+
+    #print("Applying A-B subtraction...")
+    #da[flat_chunk_list_A,:] -= atm_src
+    #da = da[flat_chunk_list_A,:]
+
+    master_id = da.chan.values
+    freq = da.d2_mkid_frequency.values
+    
+    cube_avg, cube_var = dc.make.cube(src)
+
+    return cube_avg, cube_var, master_id, freq
+
+# Multi-observation tools
 def stack_spectra(npy_loc, obsids):
     """
     Stack a collection of measured pswsc spectra on top of each other.
@@ -276,7 +312,7 @@ def stack_spectra(npy_loc, obsids):
             freq = np.load(f"npys/{obs}_freq.npy")
             obsid_good.append(obs)
         except:
-            print(_yellow(f"Could not find obsid {obs}, skipping..."))
+            print(colors._yellow(f"Could not find obsid {obs}, skipping..."))
             continue
         
         if first:
@@ -322,6 +358,7 @@ def stack_spectra(npy_loc, obsids):
 
     return avg_arr, var_arr, tot_chan, freq_arr
 
+# Post-processing stuff
 def rebin(center_freqs, bw, in_avg, in_var, in_freq):
 
     avg_binned = []

@@ -4,8 +4,11 @@ import os
 import scipy.interpolate as interp
 from datetime import datetime, timedelta
 import time
-
+epoch = datetime.utcfromtimestamp(0)
 ABSPATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def unix_time_millis(dt):
+    return int((dt - epoch).total_seconds() * 1000.0)
 
 def getInterpolatorATM():
     """!
@@ -109,5 +112,7 @@ def getInterpolatorPWV(obsid):
             time_l.append(_time)
             PWV_l.append(float(row[1]))
 
-    return interp.interp1d(np.array(time_l).astype('datetime64[ms]').astype('int'), np.array(PWV_l))
+    obsid_milli = unix_time_millis(date_obsid)
+
+    return date_obsid, interp.interp1d(np.array(time_l).astype('datetime64[ms]').astype('int'), np.array(PWV_l))(obsid_milli)
 

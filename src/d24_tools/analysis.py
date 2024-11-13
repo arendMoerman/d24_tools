@@ -14,15 +14,19 @@ KB = 1.380649e-23
 
 def obs_to_nod_avg(da_sub, conv_factor, num_nods=2, var_B=0, correct_atm=True):
     """
-    Reduce a full observation to nod (full ABBA) averages
+    Reduce a full observation to averages. 
+    Instead of a single average over a full observation, this function returns a sequence of averages, where each average
+    is taken over some number of nods. 
+    In this way, it is possible to obtain nod (or multi-nod) averages for further analysis.
 
     @param da_sub Despiked and overshoot-removed.
     @param var_B Which method to use to calculate the variance in beam B for OFF nods:
         0 : directly over beam B' and B''
         1 : over B' and B'' separately and then average
         2 : use variance of beam A and convert to beam B
+    @param correct_atm Use atmospheric correction. Default is True.
 
-    @returns 2D Numpy array containing ABBA cycles along first axis and frequency along second axis.
+    @returns 2D Numpy array containing nod (or multi-nod) averages along first axis and frequency along second axis.
     """
 
     master_id = da_sub.chan.values
