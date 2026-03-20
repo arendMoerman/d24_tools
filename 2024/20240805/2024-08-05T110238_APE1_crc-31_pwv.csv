@@ -1,0 +1,2 @@
+date,PWV,seeing,elevation,Tamb,Wind,nant,path_rms0,path_rms100,path_rms300,path_rms1000,path_rms3000,path_rms10000,PWVM,dry_phaserms,wet_phaserms
+2024-08-05T11:02:25,0.89,0.01,64.9,-11.4,10.2,44,19.6,32.0,44.7,39.3,nan,0.0,0.89,36.27,38.64
